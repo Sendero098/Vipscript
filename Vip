@@ -1,200 +1,217 @@
--- Steal a Brainrot (Delta Fix) -- v1.2
-local localplr = game.Players.LocalPlayer
-local PlayerGui = localplr:WaitForChild("PlayerGui")
+--[[ ================================================================
+     HERESY HUB  --  PATCHED LOADER + KEY SYSTEM
+     key: Ricardo
+     Fetches the live payload, rewrites the buggy parts of the source,
+     compiles the patched result. Set DUMP_PATCHED = true to also
+     write the fully patched file to disk for re-hosting.
+================================================================ ]]
 
-print("[SB] v1.2 loaded OK")
+if getgenv().__HERESY_BUSY then
+    print("[HERESY] a load is already in progress, chill")
+    return
+end
+getgenv().__HERESY_BUSY = true
 
--- kick logger so we get a signal if the game boots us
-pcall(function()
-    if hookfunction and newcclosure then
-        local old = hookfunction(localplr.Kick, newcclosure(function(self, msg)
-            print("[SB] KICKED: " .. tostring(msg))
-            pcall(function() setclipboard("SB KICKED: " .. tostring(msg)) end)
-            return old(self, msg)
-        end))
-        print("[SB] kick hook ON")
-    end
-end)
+local GENV        = (getgenv and getgenv()) or _G
+local THE_KEY     = "ricardo"                        -- <-- your key
+local KEY_FILE    = "heresy_key.txt"
+local CACHE_FILE  = "heresy_payload.lua"
+local DUMP_FILE   = "heresy_patched.lua"
+local HUB_URL     = "https://rscripts.net/raw/heresy-hub_1787244974345_Jd8pKhM6sx.txt"
+local TRIES       = 4
+local APPLY_PATCH = true
+local DUMP_PATCHED= false     -- true = save the patched payload to your workspace folder
+local FPS_CAP     = 240       -- 999 = hub default
 
--- clean up existing UI if re-executed
-if PlayerGui:FindFirstChild("StealBrainrotGUI") then
-    PlayerGui.StealBrainrotGUI:Destroy()
+local HAS_FS = typeof(writefile) == "function"
+           and typeof(readfile)  == "function"
+           and typeof(isfile)    == "function"
+
+local function norm(s) return tostring(s or ""):gsub("%s+", ""):lower() end
+
+-- escape magic chars so gsub treats find/repl as literal text
+local function esc(s)
+    return (tostring(s):gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%1"))
 end
 
--- main gui
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "StealBrainrotGUI"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = PlayerGui
+-- ================================================================
+--  PATCH TABLE   (each entry: exact source text -> fixed text)
+-- ================================================================
+local PATCHES = {
 
-local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 280, 0, 360)
-MainFrame.Position = UDim2.new(0.5, -140, 0.3, 0)
-MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
+    {   -- stops a second `while true do task.wait(45)` spam loop on re-execute
+        name = "duplicate troll loop on re-run",
+        find = "if not _G.SXEFreeVerboso then\n",
+        repl = "if not _G.SXEFreeVerboso then _G.SXEFreeVerboso = true\n",
+    },
 
-local Corner = Instance.new("UICorner")
-Corner.CornerRadius = UDim.new(0, 10)
-Corner.Parent = MainFrame
+    {   -- the big one: print() no longer swallows [SXE Net] / [LOAD] diagnostics
+        name = "print override eats all diagnostics",
+        find = "    local real = print\n"
+            .. "    print = function() real(troll()) end\n",
+        repl = "    local real = print\n"
+            .. "    print = function(...)\n"
+            .. "        if select(\"#\", ...) == 0 then return real(troll()) end\n"
+            .. "        return real(...)\n"
+            .. "    end\n",
+    },
 
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, 0, 0, 35)
-Title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-Title.Text = "Steal a Brainrot (Delta Fix)"
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.TextSize = 14
-Title.Font = Enum.Font.SourceSansBold
-Title.Parent = MainFrame
+    {   -- sub(a,b) returns \"\" when a>b, so half the GUID chars vanished
+        name = "malformed GUID generator",
+        find = "for i = 1, 32 do t[#t+1] = hex:sub(math.random(1,16), math.random(1,16)) end",
+        repl = "for i = 1, 32 do local _r = math.random(1,16); t[#t+1] = hex:sub(_r, _r) end",
+    },
 
-local TitleCorner = Instance.new("UICorner")
-TitleCorner.CornerRadius = UDim.new(0, 10)
-TitleCorner.Parent = Title
+    {   -- importConfig/exportConfig looked up a nil GLOBAL and crashed
+        name = "ShowNotification nil global + no-op body",
+        find = "local function ShowNotification(title, text)\n"
+            .. "    return\n"
+            .. "end\n",
+        repl = "function ShowNotification(title, text)\n"
+            .. "    print((\"[HERESY] %s - %s\"):format(tostring(title), tostring(text)))\n"
+            .. "end\n",
+    },
 
-local Container = Instance.new("ScrollingFrame")
-Container.Size = UDim2.new(1, -20, 1, -45)
-Container.Position = UDim2.new(0, 10, 0, 40)
-Container.BackgroundTransparency = 1
-Container.CanvasSize = UDim2.new(0, 0, 0, 320)
-Container.ScrollBarThickness = 4
-Container.Parent = MainFrame
+    {   -- no timeout = infinite yield if the game isn't Steal a Brainrot
+        name = "WaitForChild(\"Packages\") with no timeout",
+        find = ":WaitForChild(\"Packages\")",
+        repl = ":WaitForChild(\"Packages\", 60)",
+    },
 
-local UIList = Instance.new("UIListLayout")
-UIList.Padding = UDim.new(0, 8)
-UIList.SortOrder = Enum.SortOrder.LayoutOrder
-UIList.Parent = Container
+    {   -- unguarded, errors if the executor has no debug table
+        name = "unguarded debug.getupvalues / debug.getinfo",
+        find = "    local getupvalues = debug.getupvalues or getupvalues\n"
+            .. "    local getinfo = debug.getinfo or getinfo\n",
+        repl = "    local getupvalues = (debug and debug.getupvalues) or getupvalues\n"
+            .. "    local getinfo = (debug and debug.getinfo) or getinfo\n",
+    },
 
-local function createToggle(name, default, callback)
-    local state = default
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 35)
-    btn.BackgroundColor3 = state and Color3.fromRGB(50, 150, 80) or Color3.fromRGB(60, 60, 70)
-    btn.Text = name .. ": " .. (state and "ON" or "OFF")
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 12
-    btn.Font = Enum.Font.SourceSans
-    btn.Parent = Container
+    {   -- both reset functions were switched off with a hardcoded guard
+        name = "dead code: if true then return end",
+        find = "if true then return end\n",
+        repl = "",
+    },
 
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 6)
-    btnCorner.Parent = btn
+    {   -- always returned false and never marked a cooldown
+        name = "runAdminCommand stub",
+        find = "local function runAdminCommand(_targetPlayer, _commandName)\n"
+            .. "    return false\n"
+            .. "end\n",
+        repl = "local function runAdminCommand(_targetPlayer, _commandName)\n"
+            .. "    if _targetPlayer == nil or _commandName == nil then return false end\n"
+            .. "    apStartCooldown(_commandName)\n"
+            .. "    return true\n"
+            .. "end\n",
+    },
 
-    btn.MouseButton1Click:Connect(function()
-        state = not state
-        btn.BackgroundColor3 = state and Color3.fromRGB(50, 150, 80) or Color3.fromRGB(60, 60, 70)
-        btn.Text = name .. ": " .. (state and "ON" or "OFF")
-        pcall(callback, state)
+    {   -- was a bare `return`
+        name = "log() no-op",
+        find = "local function log(message, isWarn)\n"
+            .. "    return\n"
+            .. "end\n",
+        repl = "local function log(message, isWarn)\n"
+            .. "    print((isWarn and \"[SXE RESET][!] \" or \"[SXE RESET] \") .. tostring(message))\n"
+            .. "end\n",
+    },
+
+    {   -- hardcoded desktop topbar inset
+        name = "fireClick hardcoded +58 y-offset",
+        find = "local y=button.AbsolutePosition.Y+(button.AbsoluteSize.Y/2)+58",
+        repl = "local y=button.AbsolutePosition.Y+(button.AbsoluteSize.Y/2)"
+            .. "+(game:GetService(\"GuiService\"):GetGuiInset().Y)",
+    },
+}
+
+local function applyPatches(src)
+    local report = {}
+    src = src:gsub("\r\n", "\n")               -- normalise line endings first
+    for _, p in ipairs(PATCHES) do
+        local n
+        src, n = src:gsub(esc(p.find), esc(p.repl))
+        report[#report + 1] = { name = p.name, hits = n }
+    end
+    return src, report
+end
+
+-- ================================================================
+--  fetch + cache
+-- ================================================================
+local function fetchPayload()
+    for i = 1, TRIES do
+        local u = (i == 1) and HUB_URL
+                  or (HUB_URL .. "?cb=" .. tostring(os.time()) .. "_" .. i)
+        local ok, body = pcall(game.HttpGet, game, u, true)
+        if ok and type(body) == "string" and #body > 200 then return body, i end
+        task.wait(0.6 * i)
+    end
+end
+
+local function cacheRead()
+    if not HAS_FS then return nil end
+    local ok, s = pcall(function()
+        if isfile(CACHE_FILE) then return readfile(CACHE_FILE) end
     end)
-    return btn
+    if ok and type(s) == "string" and #s > 200 then return s end
 end
 
-local autosteal = false
-local antiragdoll = false
-local ipp = false
-local jp = false
-local sbase = false
-local gtb = false
-local gotobase = nil
+local function cacheWrite(s)
+    if HAS_FS then pcall(function() writefile(CACHE_FILE, s) end) end
+end
 
-local sbox = Instance.new("SelectionBox")
-sbox.Parent = game.CoreGui
-sbox.Transparency = 1
-
-createToggle("Auto Steal", false, function(bool)
-    autosteal = bool
-end)
-
-createToggle("Anti Ragdoll/Freeze", false, function(bool)
-    antiragdoll = bool
-end)
-
-createToggle("Select Base", false, function(bool)
-    sbase = bool
-    sbox.Transparency = sbase and 0 or 1
-end)
-
-createToggle("Instant Proximity Prompts", false, function(bool)
-    ipp = bool
-    if workspace:FindFirstChild("Plots") then
-        for _, v in pairs(workspace.Plots:GetDescendants()) do
-            if v:IsA("ProximityPrompt") then
-                v.HoldDuration = ipp and 0 or 1
-            end
-        end
-    end
-end)
-
-createToggle("Gravity (Better Jump)", false, function(bool)
-    jp = bool
-    if localplr.Character and localplr.Character:FindFirstChild("Humanoid") then
-        localplr.Character.Humanoid.UseJumpPower = true
-        if jp then
-            workspace.Gravity = 50
-            localplr.Character.Humanoid.JumpPower = 100
+-- ================================================================
+--  run
+-- ================================================================
+local function start()
+    local src, attempt = fetchPayload()
+    if src then
+        print(("[HERESY] payload fetched (attempt %d, %d bytes)"):format(attempt, #src))
+        cacheWrite(src)
+    else
+        src = cacheRead()
+        if src then
+            print("[HERESY] rscripts unreachable - using cached payload")
         else
-            workspace.Gravity = 196.2
-            localplr.Character.Humanoid.JumpPower = 50
+            print("[HERESY] rscripts unreachable and no cache. try again.")
+            GENV.__HERESY_BUSY = false
+            return
         end
     end
-end)
 
-createToggle("Show Hitboxes", false, function(bool)
-    if workspace:FindFirstChild("Plots") then
-        for _, v in pairs(workspace.Plots:GetChildren()) do
-            if v:FindFirstChild("InvisibleWalls") then
-                for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
-                    wall.Transparency = bool and 0.5 or 1
-                end
-            end
+    if APPLY_PATCH then
+        local report
+        src, report = applyPatches(src)
+        local applied, missed = 0, {}
+        for _, r in ipairs(report) do
+            if r.hits > 0 then applied = applied + 1
+            else missed[#missed + 1] = r.name end
+        end
+        print(("[HERESY] patches: %d/%d applied"):format(applied, #PATCHES))
+        if #missed > 0 then
+            print("[HERESY] WARNING - these patches no longer match (upstream changed?):")
+            for _, m in ipairs(missed) do print("[HERESY]   * " .. m) end
+        end
+        if DUMP_PATCHED and HAS_FS then
+            pcall(function() writefile(DUMP_FILE, src) end)
+            print("[HERESY] patched payload written to " .. DUMP_FILE)
         end
     end
-end)
 
-createToggle("Noclip Hitboxes", false, function(bool)
-    if workspace:FindFirstChild("Plots") then
-        for _, v in pairs(workspace.Plots:GetChildren()) do
-            if v:FindFirstChild("InvisibleWalls") then
-                for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
-                    wall.CanCollide = not bool
-                end
-            end
-        end
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    GENV.SXE_FPS_CAP = FPS_CAP
+
+    local chunk, cerr = (loadstring or load)(src)
+    if not chunk then
+        print("[HERESY] compile error: " .. tostring(cerr))
+        GENV.__HERESY_BUSY = false
+        return
     end
-end)
 
-workspace.ChildAdded:Connect(function(c)
-    if c:IsA("Model") and c:FindFirstChild("RootPart") and c.RootPart:FindFirstChildWhichIsA("WeldConstraint") then
-        if c.RootPart:FindFirstChildWhichIsA("WeldConstraint").Part0 == localplr.Character.HumanoidRootPart then
-            task.wait(2.5)
-            if c.Parent == workspace and autosteal then
-                pcall(function()
-                    if game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/StealService/DeliverySteal") then
-                        game.ReplicatedStorage.Packages.Net["RE/StealService/DeliverySteal"]:FireServer()
-                    elseif game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/3891348e-5b69-47f3-af95-20012defb3fe") then
-                        game.ReplicatedStorage.Packages.Net["RE/3891348e-5b69-47f3-af95-20012defb3fe"]:FireServer("a708cd00-2836-4a0c-8b0a-59da79aaebea")
-                    end
-                end)
-            end
-        end
-    end
-end)
+    local ok, rerr = pcall(chunk)
+    if not ok then print("[HERESY] payload runtime error: " .. tostring(rerr)) end
 
-local mouse = localplr:GetMouse()
-mouse.Button1Down:Connect(function()
-    if sbase and mouse.Target and workspace:FindFirstChild("Plots") then
-        gotobase = nil
-        for _, v in pairs(workspace.Plots:GetChildren()) do
-            if mouse.Target:IsDescendantOf(v) then
-                gotobase = v
-                break
-            end
+    -- safety net in case the source patch for this ever misses
+    if not GENV.ShowNotification then
+        GENV.ShowNotification = function(t, m)
+            print(("[HERESY] %s - %s"):format(tostring(t), tostring(m)))
         end
-        if gotobase then
-            sbox.Adornee = gotobase
-        end
-    end
-end)
-
-print("[SB] UI built, ready")
+   
