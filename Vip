@@ -1,8 +1,8 @@
--- Steal a Brainrot (Delta Fix) -- v1.1
+-- Steal a Brainrot (Delta Fix) -- v1.2
 local localplr = game.Players.LocalPlayer
 local PlayerGui = localplr:WaitForChild("PlayerGui")
 
-print("[SB] v1.1 loaded OK")
+print("[SB] v1.2 loaded OK")
 
 -- kick logger so we get a signal if the game boots us
 pcall(function()
@@ -132,4 +132,69 @@ createToggle("Gravity (Better Jump)", false, function(bool)
         localplr.Character.Humanoid.UseJumpPower = true
         if jp then
             workspace.Gravity = 50
-            localplr.Character.Humanoid.Jump
+            localplr.Character.Humanoid.JumpPower = 100
+        else
+            workspace.Gravity = 196.2
+            localplr.Character.Humanoid.JumpPower = 50
+        end
+    end
+end)
+
+createToggle("Show Hitboxes", false, function(bool)
+    if workspace:FindFirstChild("Plots") then
+        for _, v in pairs(workspace.Plots:GetChildren()) do
+            if v:FindFirstChild("InvisibleWalls") then
+                for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
+                    wall.Transparency = bool and 0.5 or 1
+                end
+            end
+        end
+    end
+end)
+
+createToggle("Noclip Hitboxes", false, function(bool)
+    if workspace:FindFirstChild("Plots") then
+        for _, v in pairs(workspace.Plots:GetChildren()) do
+            if v:FindFirstChild("InvisibleWalls") then
+                for _, wall in pairs(v.InvisibleWalls:GetChildren()) do
+                    wall.CanCollide = not bool
+                end
+            end
+        end
+    end
+end)
+
+workspace.ChildAdded:Connect(function(c)
+    if c:IsA("Model") and c:FindFirstChild("RootPart") and c.RootPart:FindFirstChildWhichIsA("WeldConstraint") then
+        if c.RootPart:FindFirstChildWhichIsA("WeldConstraint").Part0 == localplr.Character.HumanoidRootPart then
+            task.wait(2.5)
+            if c.Parent == workspace and autosteal then
+                pcall(function()
+                    if game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/StealService/DeliverySteal") then
+                        game.ReplicatedStorage.Packages.Net["RE/StealService/DeliverySteal"]:FireServer()
+                    elseif game.ReplicatedStorage.Packages.Net:FindFirstChild("RE/3891348e-5b69-47f3-af95-20012defb3fe") then
+                        game.ReplicatedStorage.Packages.Net["RE/3891348e-5b69-47f3-af95-20012defb3fe"]:FireServer("a708cd00-2836-4a0c-8b0a-59da79aaebea")
+                    end
+                end)
+            end
+        end
+    end
+end)
+
+local mouse = localplr:GetMouse()
+mouse.Button1Down:Connect(function()
+    if sbase and mouse.Target and workspace:FindFirstChild("Plots") then
+        gotobase = nil
+        for _, v in pairs(workspace.Plots:GetChildren()) do
+            if mouse.Target:IsDescendantOf(v) then
+                gotobase = v
+                break
+            end
+        end
+        if gotobase then
+            sbox.Adornee = gotobase
+        end
+    end
+end)
+
+print("[SB] UI built, ready")
