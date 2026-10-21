@@ -1,25 +1,21 @@
---[[ SAB AutoSteal v0.2 - keyless, mobile/Delta friendly
-     FIX: observeTag is now WRAPPED (original still runs), not replaced ]]
+--[[ SAB AutoSteal v0.3 - GUI + Net API probe - keyless / Delta mobile ]]
 
-local Players      = game:GetService("Players")
-local RS           = game:GetService("ReplicatedStorage")
-local RunService   = game:GetService("RunService")
-local HttpService  = game:GetService("HttpService")
-local TeleportSvc  = game:GetService("TeleportService")
-local player       = Players.LocalPlayer
+local Players     = game:GetService("Players")
+local RS          = game:GetService("ReplicatedStorage")
+local RunService  = game:GetService("RunService")
+local UIS         = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local TeleportSvc = game:GetService("TeleportService")
+local player      = Players.LocalPlayer
 
 local CFG = {
-    AutoSteal = true, Interval = 0.25, MinValue = 0,
+    AutoSteal = false, Interval = 0.2, MinValue = 0,
     Teleport = true, AntiCheat = true, Noclip = true, Desync = false,
-    Debug = true,
 }
 getgenv().SAB = CFG
+local function log(...) print("[SAB]", ...) end
 
-local function log(...) if CFG.Debug then print("[SAB]", ...) end end
-
-------------------------------------------------------------------
--- 1. ANTI-CHEAT (observeTag WRAPPED so the AC's callback still runs)
-------------------------------------------------------------------
+-- ===== 1. ANTI-CHEAT =====
 if CFG.AntiCheat then
     local hooked = false
     pcall(function()
@@ -33,7 +29,6 @@ if CFG.AntiCheat then
                         local stub = { Disconnect = function() end, disconnect = function() end }
                         if ok and type(conn) == "table" then
                             stub.Connected = true
-                            stub.__conn = conn
                             setmetatable(stub, {
                                 __index = function(_, k)
                                     local val = conn[k]
@@ -69,43 +64,43 @@ if CFG.AntiCheat then
             return old(self, ...)
         end)
         if setreadonly then setreadonly(mt, true) end
-        log("kick + flag hook installed")
     end)
 end
 
-------------------------------------------------------------------
--- 2. FIND THE STEAL REMOTE AT RUNTIME
-------------------------------------------------------------------
-local function resolveStealRemote()
-    for _, root in ipairs({ RS, RS:FindFirstChild("Remotes"), RS:FindFirstChild("Events"),
-                            RS:FindFirstChild("RemoteEvents"), RS:FindFirstChild("Net") }) do
-        if root then
-            for _, o in ipairs(root:GetDescendants()) do
-                if o:IsA("RemoteEvent") and o.Name:lower():find("steal") then return o end
-            end
-        end
+-- ===== 2. NET REMOTES =====
+local function getNet()
+    for _, o in ipairs(RS:GetDescendants()) do
+        if o:IsA("Folder") and o.Name == "Net" then return o end
     end
 end
 
-local StealRemote
-task.spawn(function()
-    while not StealRemote do
-        StealRemote = resolveStealRemote()
-        if not StealRemote then task.wait(1) end
-    end
-    getgenv().SAB_StealRemote = StealRemote
-    log("STEAL REMOTE ->", StealRemote:GetFullName())
-end)
+local NetFolder = getNet()
+local StealRemotes, RemoteIndex = {}, 1
 
-------------------------------------------------------------------
--- 3. SCAN BRAINROTS
-------------------------------------------------------------------
+local function refreshRemotes()
+    StealRemotes = {}
+    if not NetFolder then NetFolder = getNet() end
+    if not NetFolder then return end
+    for _, o in ipairs(NetFolder:GetDescendants()) do
+        if o:IsA("RemoteEvent") and o.Name:lower():find("steal") then
+            StealRemotes[#StealRemotes+1] = o
+        end
+    end
+    table.sort(StealRemotes, function(a,b) return a.Name < b.Name end)
+    RemoteIndex = math.clamp(RemoteIndex, 1, math.max(#StealRemotes, 1))
+    log("steal remotes:", #StealRemotes)
+    for i, r in ipairs(StealRemotes) do log("  ["..i.."]", r.Name) end
+end
+refreshRemotes()
+
+local function currentRemote() return StealRemotes[RemoteIndex] end
+
+-- ===== 3. SCAN =====
 local function getOwner(o)
     local v = o:FindFirstChild("Owner")
     if v and (v:IsA("ObjectValue") or v:IsA("StringValue")) then return v.Value end
     return o:GetAttribute("Owner")
 end
-
 local function getValue(o)
     for _, n in ipairs({"Value","Price","Worth","Cost"}) do
         local v = o:FindFirstChild(n)
@@ -113,7 +108,6 @@ local function getValue(o)
     end
     return o:GetAttribute("Value") or o:GetAttribute("Price") or 0
 end
-
 local function scan()
     local out = {}
     for _, o in ipairs(workspace:GetDescendants()) do
@@ -132,25 +126,159 @@ local function scan()
     return out
 end
 
-------------------------------------------------------------------
--- 4. STEAL
-------------------------------------------------------------------
-local function stealOnce()
-    local list = scan()
-    local t = list[1]
-    if not t or not StealRemote then return end
+-- ===== 4. ACTIONS =====
+local statusText = "idle"
+
+local function goTo(t)
     local char = player.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    if CFG.Teleport then hrp.CFrame = t.root.CFrame * CFrame.new(0, 3, 0) end
-    if CFG.Desync then hrp.Anchored = true end
-    StealRemote:FireServer(t.obj)
-    if CFG.Desync then task.wait(); hrp.Anchored = false end
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp and CFG.Teleport then hrp.CFrame = t.root.CFrame * CFrame.new(0,3,0) end
+    return hrp
 end
 
-------------------------------------------------------------------
--- 5. LOOPS
-------------------------------------------------------------------
+local function stealOnce()
+    local t = scan()[1]
+    if not t then statusText = "no target"; return end
+    local r = currentRemote()
+    if not r then statusText = "no remote"; return end
+    local hrp = goTo(t)
+    if not hrp then return end
+    if CFG.Desync then hrp.Anchored = true end
+    r:FireServer(t.obj)
+    if CFG.Desync then task.wait(); hrp.Anchored = false end
+    statusText = "steal -> " .. t.obj.Name
+end
+
+local function probe()
+    local t = scan()[1]
+    if not t then statusText = "probe: no target"; return end
+    goTo(t); task.wait(0.3)
+    log("=== PROBE on", t.obj.Name, "value", t.val, "===")
+    for _, r in ipairs(StealRemotes) do
+        pcall(function() r:FireServer(t.obj) end)
+        log("fired ->", r.Name)
+        task.wait(0.5)
+    end
+    statusText = "probe done - watch which one worked"
+    log("=== PROBE END ===")
+end
+
+local function hop()
+    local ok, body = pcall(game.HttpGet, game,
+        ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.GameId))
+    if not ok then return end
+    local list = {}
+    for _, s in ipairs(HttpService:JSONDecode(body).data or {}) do
+        if s.id ~= game.JobId and s.playing < s.maxPlayers then list[#list+1] = s end
+    end
+    if #list > 0 then TeleportSvc:TeleportToPlaceInstance(game.PlaceId, list[1].id, player) end
+end
+
+-- ===== 5. GUI =====
+local gui = Instance.new("ScreenGui")
+gui.Name = "SAB_v03"; gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true
+gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(210, 268)
+main.Position = UDim2.new(0, 12, 0, 70)
+main.BackgroundColor3 = Color3.fromRGB(16,16,20)
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0,10)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1,0,0,30)
+title.BackgroundColor3 = Color3.fromRGB(30,30,38)
+title.Text = "SAB AutoSteal v0.3"
+title.TextColor3 = Color3.fromRGB(255,255,255)
+title.Font = Enum.Font.GothamBold; title.TextSize = 13
+title.Parent = main
+Instance.new("UICorner", title).CornerRadius = UDim.new(0,10)
+
+local function mkBtn(text, y, h)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1,-16,0,h or 30)
+    b.Position = UDim2.new(0,8,0,y)
+    b.BackgroundColor3 = Color3.fromRGB(42,42,52)
+    b.Text = text; b.TextColor3 = Color3.fromRGB(240,240,240)
+    b.Font = Enum.Font.Gotham; b.TextSize = 12
+    b.Parent = main
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0,6)
+    return b
+end
+
+local btnSteal = mkBtn("Auto Steal: OFF", 38)
+local btnRemote = mkBtn("Remote: -", 72)
+local btnScan  = mkBtn("Scan targets", 106)
+local btnProbe = mkBtn("PROBE remotes", 140)
+local btnHop   = mkBtn("Server hop", 174)
+local btnMinP  = mkBtn("-", 208, 26)
+btnMinP.Size = UDim2.new(0.5,-12,0,26)
+local btnMinM  = mkBtn("+", 208, 26)
+btnMinM.Size = UDim2.new(0.5,-12,0,26)
+btnMinM.Position = UDim2.new(0.5,4,0,208)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1,-16,0,20)
+status.Position = UDim2.new(0,8,0,240)
+status.BackgroundTransparency = 1
+status.Text = "idle"; status.TextColor3 = Color3.fromRGB(150,150,160)
+status.Font = Enum.Font.Gotham; status.TextSize = 10
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Parent = main
+
+local function updRemote()
+    local r = currentRemote()
+    btnRemote.Text = r and ("Remote: "..r.Name:gsub("RE/","")) or "Remote: none"
+end
+updRemote()
+
+btnSteal.MouseButton1Click:Connect(function()
+    CFG.AutoSteal = not CFG.AutoSteal
+    btnSteal.Text = "Auto Steal: " .. (CFG.AutoSteal and "ON" or "OFF")
+    btnSteal.BackgroundColor3 = CFG.AutoSteal and Color3.fromRGB(35,90,55) or Color3.fromRGB(42,42,52)
+end)
+btnRemote.MouseButton1Click:Connect(function()
+    if #StealRemotes == 0 then return end
+    RemoteIndex = (RemoteIndex % #StealRemotes) + 1
+    updRemote()
+end)
+btnScan.MouseButton1Click:Connect(function()
+    local l = scan()
+    status.Text = ("targets: %d  best: %s"):format(#l, l[1] and l[1].obj.Name or "none")
+    log("scan:", #l, "targets")
+end)
+btnProbe.MouseButton1Click:Connect(function() task.spawn(probe) end)
+btnHop.MouseButton1Click:Connect(function() hop() end)
+btnMinP.MouseButton1Click:Connect(function()
+    CFG.MinValue = math.max(0, CFG.MinValue - 100)
+    btnMinP.Text = "Min "..CFG.MinValue
+end)
+btnMinM.MouseButton1Click:Connect(function()
+    CFG.MinValue = CFG.MinValue + 100
+    btnMinM.Text = "Min "..CFG.MinValue
+end)
+
+-- drag
+local dragging, dStart, dPos
+title.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true; dStart = i.Position; dPos = main.Position
+    end
+end)
+UIS.InputChanged:Connect(function(i)
+    if dragging and (i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseMovement) then
+        local d = i.Position - dStart
+        main.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X, dPos.Y.Scale, dPos.Y.Offset + d.Y)
+    end
+end)
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+end)
+
+-- ===== 6. LOOPS =====
 RunService.Stepped:Connect(function()
     if not CFG.Noclip then return end
     local char = player.Character
@@ -164,35 +292,9 @@ end)
 task.spawn(function()
     while true do
         task.wait(CFG.Interval)
+        status.Text = statusText
         if CFG.AutoSteal then pcall(stealOnce) end
     end
 end)
 
-------------------------------------------------------------------
--- 6. HOP + COMMANDS
-------------------------------------------------------------------
-local function hop()
-    local ok, body = pcall(game.HttpGet, game,
-        ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.GameId))
-    if not ok then return end
-    local list = {}
-    for _, s in ipairs(HttpService:JSONDecode(body).data or {}) do
-        if s.id ~= game.JobId and s.playing < s.maxPlayers then list[#list+1] = s end
-    end
-    if #list > 0 then TeleportSvc:TeleportToPlaceInstance(game.PlaceId, list[1].id, player) end
-end
-
-player.Chatted:Connect(function(msg)
-    local m = msg:lower()
-    if m == "/sab off" then CFG.AutoSteal = false; log("steal OFF")
-    elseif m == "/sab on" then CFG.AutoSteal = true; log("steal ON")
-    elseif m == "/sab hop" then hop()
-    elseif m == "/sab tp" then CFG.Teleport = not CFG.Teleport; log("tp:", CFG.Teleport)
-    elseif m == "/sab desync" then CFG.Desync = not CFG.Desync; log("desync:", CFG.Desync)
-    elseif m == "/sab scan" then
-        local l = scan()
-        log("targets:", #l, "best:", l[1] and l[1].obj.Name or "none", l[1] and l[1].val or "")
-    elseif m == "/sab help" then log("/sab on|off|hop|tp|desync|scan|help") end
-end)
-
-log("v0.2 loaded")
+log("v0.3 loaded - GUI top-left")
