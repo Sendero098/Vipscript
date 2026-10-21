@@ -1,0 +1,97 @@
+-- Services
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local RootPart = Character:WaitForChild("HumanoidRootPart")
+
+-- Configuration
+local Settings = {
+    Enabled = true,
+    StrafeDirection = 1, -- 1 for Right, -1 for Left
+    SpeedMultiplier = 1.0, -- Multiplier on top of WalkSpeed
+    Smoothness = 0.1, -- 0 to 1, lower is smoother but slower to react
+    UseCameraRelative = true, -- Strafe relative to camera
+    ToggleKey = Enum.KeyCode.RightControl -- Key to toggle auto-strafe
+}
+
+local isStrafing = false
+local currentStrafeDir = 1
+local lastInputTime = os.clock()
+
+-- Keybind Handler
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Settings.ToggleKey then
+        isStrafing = not isStrafing
+        print("[AutoStrafe] " .. (isStrafing and "ENABLED" or "DISABLED"))
+        
+        -- Optional: Visual feedback via a simple label or sound
+        if isStrafing then
+            currentStrafeDir = 1 -- Default to right when enabled
+        end
+    end
+end)
+
+-- Allow switching direction with A/D keys even when auto is on
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not isStrafing then return end
+    if input.KeyCode == Enum.KeyCode.A then
+        currentStrafeDir = -1
+    elseif input.KeyCode == Enum.KeyCode.D then
+        currentStrafeDir = 1
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+    if not isStrafing then return end
+    -- Optional: If you want to stop strafing when releasing A/D
+    -- if input.KeyCode == Enum.KeyCode.A or input.KeyCode == Enum.KeyCode.D then
+    --     isStrafing = false 
+    -- end
+end)
+
+-- Main Loop
+RunService.RenderStepped:Connect(function()
+    if not isStrafing or not Humanoid or not Humanoid.Parent then return end
+
+    local camera = workspace.CurrentCamera
+    local cameraCFrame = camera.CFrame
+    
+    -- Calculate Strafe Vector
+    local strafeVector
+    if Settings.UseCameraRelative then
+        -- Right vector of the camera
+        local rightVector = cameraCFrame.RightVector
+        strafeVector = rightVector * currentStrafeDir
+    else
+        -- World axis strafe
+        strafeVector = Vector3.new(currentStrafeDir, 0, 0)
+    end
+
+    -- Normalize and apply speed multiplier
+    local targetSpeed = Humanoid.WalkSpeed * Settings.SpeedMultiplier
+    local targetVelocity = strafeVector * targetSpeed
+
+    -- Smoothly interpolate (Lerp) to target velocity for better feel
+    local currentVelocity = Humanoid.MoveDirection
+    local newVelocity = Vector3.Lerp(currentVelocity, targetVelocity, Settings.Smoothness)
+    
+    -- Force the Humanoid to move in this direction
+    Humanoid:Move(newVelocity)
+end)
+
+-- Handle Character Reset
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    Character = newChar
+    Humanoid = Character:WaitForChild("Humanoid")
+    RootPart = Character:WaitForChild("HumanoidRootPart")
+    isStrafing = false -- Reset on death
+    print("[AutoStrafe] Character reset detected. Auto-strafe disabled.")
+end)
+
+print("[AutoStrafe] Loaded. Press " .. Settings.ToggleKey.Name .. " to toggle.")
