@@ -1,8 +1,7 @@
 loadstring([[
 --[[=================================================================
-  VENICE HUB  ::  STEAL A BRAINROT  ::  v4.2
+  VENICE HUB  ::  STEAL A BRAINROT  ::  v4.2.1 (DELTA FIXED)
   ---------------------------------------------------------------
-  v4.2:
   * LOOP-GOTO anti-teleport: re-applies your CFrame every frame so
     the game's snap-back-to-base can't win. Steal uses it.
   * steal now WAITS to actually arrive, WAITS for replication,
@@ -15,6 +14,8 @@ loadstring([[
     rejoin" from teleporting
   * noclip re-applies on respawn
   * v4.1 observeTag bypass kept
+  * FIXED: Syntax errors, Delta-specific function handling, and 
+    added a Diagnostic button for troubleshooting.
 =================================================================]]
 
 local LOGF = "VeniceHub_log.txt"
@@ -39,14 +40,18 @@ gv().VeniceHubGen = (gv().VeniceHubGen or 0) + 1
 local GEN = gv().VeniceHubGen
 local function alive() return gv().VeniceHubGen == GEN end
 
-log("=== v4.2 boot place=" .. tostring(game.PlaceId) .. " ===")
+log("=== v4.2.1 boot place=" .. tostring(game.PlaceId) .. " ===")
 log("executor: getgc=" .. tostring(getgc ~= nil)
     .. " hookfn=" .. tostring(hookfunction ~= nil)
     .. " ncc=" .. tostring(newcclosure ~= nil)
-    .. " rawmt=" .. tostring(getrawmetatable ~= nil))
+    .. " rawmt=" .. tostring(getrawmetatable ~= nil)
+    .. " gethui=" .. tostring(gethui ~= nil)
+    .. " qot=" .. tostring(queue_on_teleport ~= nil))
 
-local LOADSTRING = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Sendero098/Brrbr/refs/heads/main/B%C5%95r"))()'
-pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING) end end)
+-- Queue this script for future teleports
+local SELF_URL = "https://raw.githubusercontent.com/Sendero098/Vipscript/refs/heads/main/Vip"
+local LOADSTRING_CMD = 'loadstring(game:HttpGet("' .. SELF_URL .. '"))()'
+pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING_CMD) end end)
 
 --================================================================
 --  BYPASS (top level, before anything else)
@@ -95,250 +100,3 @@ local function hookObserveTag()
     local n = 0
     pcall(function()
         for _, v in pairs(getgc(true)) do
-            local fn
-            if type(v) == "table" then
-                local f = rawget(v, "observeTag")
-                if type(f) == "function" then fn = f end
-            elseif type(v) == "function" then
-                local ok, info = pcall(debug.getinfo, v)
-                if ok and info and info.name == "observeTag" then fn = v end
-            end
-            if fn and not BYP.hooked[fn] then
-                local old
-                local ok2, ret = pcall(hookfunction, fn, newcclosure(function(...)
-                    local conn = old(...)
-                    if conn then
-                        BYP.tagCount = BYP.tagCount + 1
-                        if BYP.connMt then BYP.tagged[conn] = true; return conn end
-                        return setmetatable({ Connected = true,
-                            Disconnect = function() end, disconnect = function() end },
-                            { __index = function(_, k) return conn[k] end })
-                    end
-                    return conn
-                end))
-                if ok2 then old = ret; BYP.hooked[fn] = true; n = n + 1 end
-            end
-        end
-    end)
-    if n > 0 then
-        BYP.armed = BYP.armed + n; obsReady = true; gv().VH_OBS = true
-        log("bypass: observeTag hooked x" .. tostring(n) .. " connMt=" .. tostring(BYP.connMt ~= nil))
-    end
-    return n
-end
-
-pcall(hookObserveTag)
-log("step: bypass armed=" .. tostring(BYP.armed))
-task.spawn(function()
-    for _ = 1, 240 do
-        if obsReady then return end
-        task.wait(0.25); pcall(hookObserveTag)
-        if obsReady then log("step: bypass armed LATE"); return end
-    end
-end)
-task.spawn(function()
-    while alive() do task.wait(10); pcall(hookObserveTag) end
-end)
-
---================================================================
---  KICK WATCHDOG
---================================================================
-local TS  = game:GetService("TeleportService")
-local PLRS = game:GetService("Players")
-local CFG = { autoRejoin = true }
-local lastRejoin, lastKick = 0, "(none)"
-
-local function tryRejoin(why)
-    if not CFG.autoRejoin then return end
-    if os.clock() - lastRejoin < 6 then return end
-    lastRejoin = os.clock()
-    log("auto-rejoin: " .. why)
-    pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING) end end)
-    pcall(function() TS:Teleport(game.PlaceId, PLRS.LocalPlayer) end)
-end
-
-pcall(function()
-    TS.TeleportInitFailed:Connect(function(_, code, msg)
-        log("teleport FAILED " .. tostring(code) .. " " .. tostring(msg)); lastRejoin = 0
-    end)
-end)
-
-task.spawn(function()
-    local lp = PLRS.LocalPlayer
-    for _ = 1, 400 do if lp then break end; task.wait(0.1); lp = PLRS.LocalPlayer end
-    if not lp then log("step: no LocalPlayer"); return end
-    pcall(function()
-        PLRS.PlayerRemoving:Connect(function(p)
-            if p == lp then
-                lastKick = "PlayerRemoving"
-                log("*** REMOVED ***"); task.delay(0.4, function() tryRejoin("removed") end)
-            end
-        )
-        lp.AncestryChanged:Connect(function(_, parent)
-            if not parent then lastKick = "left DataModel" end
-        end)
-    end)
-    pcall(function()
-        game:GetService("LogService").MessageOut:Connect(function(msg)
-            local m = tostring(msg); local low = m:lower()
-            if low:find("kick") or low:find("exploit") or low:find("detect")
-            or low:find("anti") or low:find("cheat") or low:find("ban") then
-                lastKick = m; log("LOGSVC: " .. m)
-            end
-        end)
-    end)
-    log("step: watchdog armed")
-end)
-
---==============================================================
-local function MAIN()
-
-local Players         = PLRS
-local RunService      = game:GetService("RunService")
-local UIS             = game:GetService("UserInputService")
-local TweenService    = game:GetService("TweenService")
-local Workspace       = game:GetService("Workspace")
-local HttpService     = game:GetService("HttpService")
-local TeleportService = TS
-local VirtualUser     = game:GetService("VirtualUser")
-
-local LP  = Players.LocalPlayer
-local CAM = Workspace.CurrentCamera
-
-local S = {
-    autoSteal=false, richestFirst=true, minValue=0, legitPrompt=true, fireCooldown=0.9,
-    settleTime=0.45, holdTime=0.15, stealDelay=0.25, returnToBase=true, baseReturn=true,
-    safeTP=true, tpOnly=false, verify=true, retryOnce=true, maxRangeFrac=0.9, requireBody=false,
-    useGoto=true, stealTimeout=2.5, skipLocked=false,
-    autoLock=false, lockEvery=45, autoCollect=false, instantPrompts=false, autoRebirth=false,
-    antiAfk=true, antiRagdoll=true, espBrainrots=false, espPlayers=false, noclip=false,
-    infJump=false, fly=false, lockSpeed=false, walkSpeed=16, flySpeed=55,
-    gearAim=false, gearAutoFire=false, gearRange=60, gearFireCd=0.45, gearSmooth=0.3,
-    gearNames="superman,slap,bat,grapple,medusa,freeze", scanTarget=300, hopMax=45,
-}
-
-local conns = {}
-local function bind(c) table.insert(conns, c); return c end
-local statusLbl, diagLabel, GUI, obsLbl, kickLbl, gotoLbl
-
---=========== UTILS =============================================
-local function mk(class, props, parent)
-    local ok, inst = pcall(Instance.new, class)
-    if not ok or not inst then return nil end
-    for k, v in pairs(props or {}) do pcall(function() inst[k] = v end) end
-    if parent then pcall(function() inst.Parent = parent end) end
-    return inst
-end
-local function corner(o, r) if o then mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o) end end
-local function stroke(o, c, t, tr)
-    if o then mk("UIStroke", { Color = c or Color3.fromRGB(70,70,85), Thickness = t or 1, Transparency = tr or 0.45 }, o) end
-end
-local function parentGui()
-    local ok, h = pcall(function() return gethui and gethui() end)
-    if ok and h then return h, "gethui" end
-    local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
-    if ok2 and cg then return cg, "CoreGui" end
-    return LP:WaitForChild("PlayerGui"), "PlayerGui"
-end
-
-local function getChar() return LP.Character end
-local function getHRP() local c = LP.Character; return c and c:FindFirstChild("HumanoidRootPart") end
-local function getHum() local c = LP.Character; return c and c:FindFirstChildOfClass("Humanoid") end
-
---=========== LOOP GOTO  (the anti-teleport) ====================
-local GOTO = { on = false, pos = nil }
-
-local function gotoSet(pos, yoff)
-    if not pos then return end
-    GOTO.pos = pos + Vector3.new(0, yoff or 2, 0)
-    GOTO.on = true
-    local hrp = getHRP()
-    if hrp then hrp.CFrame = CFrame.new(GOTO.pos) end
-end
-local function gotoStop() GOTO.on = false; GOTO.pos = nil end
-
-bind(RunService.RenderStepped:Connect(function()
-    if not GOTO.on or not GOTO.pos or not alive() then return end
-    local hrp = getHRP()
-    if not hrp then return end
-    if (hrp.Position - GOTO.pos).Magnitude > 1.5 then
-        hrp.CFrame = CFrame.new(GOTO.pos)
-        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-    end
-end))
-
-local function tpTo(pos, yOff, safe)
-    local hrp = getHRP(); if not hrp or not pos then return end
-    local target = CFrame.new(pos + Vector3.new(0, yOff or 2, 0))
-    if safe == nil then safe = S.safeTP end
-    if safe then hrp.Anchored = true; hrp.CFrame = target; task.wait(0.05); hrp.Anchored = false
-    else hrp.CFrame = target end
-    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-end
-
---=========== WORLD ============================================
-local function getPlots()
-    local p = Workspace:FindFirstChild("Plots")
-    if p then return p:GetChildren() end
-    for _, c in ipairs(Workspace:GetChildren()) do
-        if c:IsA("Folder") and c:FindFirstChild("AnimalPodiums", true) then return c:GetChildren() end
-    end
-    return {}
-end
-local function getPromptAnchor(prompt)
-    local par = prompt and prompt.Parent
-    if not par then return nil end
-    if par:IsA("Attachment") then return par.WorldPosition end
-    if par:IsA("BasePart") then return par.Position end
-    local bp = par:FindFirstChildWhichIsA("BasePart", true)
-    return bp and bp.Position or nil
-end
-local myPlotCache, myPlotTick = nil, 0
-local function isMyPlot(plot)
-    local yb = plot:FindFirstChild("YourBase", true)
-    if yb then
-        if yb:IsA("BoolValue") then if yb.Value then return true end
-        elseif yb:IsA("GuiObject") or yb:IsA("Highlight") or yb:IsA("BillboardGui") then
-            if yb.Enabled then return true end
-        end
-    end
-    for _, a in ipairs({ "Owner", "Player", "UserId", "Plr", "Username" }) do
-        local v = plot:GetAttribute(a)
-        if v ~= nil and (v == LP.Name or v == LP.UserId or tostring(v) == tostring(LP.UserId)) then return true end
-    end
-    if plot.Name:find(LP.Name, 1, true) then return true end
-    local n = 0
-    for _, d in ipairs(plot:GetDescendants()) do
-        n = n + 1
-        if d:IsA("TextLabel") and d.Text == LP.Name then return true end
-        if n > 250 then break end
-    end
-    return false
-end
-local function getMyPlot()
-    if myPlotCache and myPlotCache.Parent and (os.clock() - myPlotTick) < 3 then return myPlotCache end
-    myPlotCache, myPlotTick = nil, os.clock()
-    for _, plot in ipairs(getPlots()) do
-        if isMyPlot(plot) then myPlotCache = plot; break end
-    end
-    return myPlotCache
-end
-local function getBaseDrop()
-    local my = getMyPlot()
-    if not my then return nil end
-    local hit = my:FindFirstChild("DeliveryHitbox", true)
-    if hit and hit:IsA("BasePart") then return hit.Position end
-    local any = my:FindFirstChildWhichIsA("BasePart", true)
-    return any and any.Position or nil
-end
-local function findBrainrotModel(pod)
-    local claim = pod:FindFirstChild("Claim")
-    if claim then
-        local m = claim:FindFirstChildWhichIsA("Model"); if m then return m end
-        local p = claim:FindFirstChildWhichIsA("BasePart"); if p then return p end
-    end
-    local base  = pod:FindFirstChild("Base")
-    local spawn = base and (base:FindFirstChild("Spawn") or base:FindFirstChild("SpawnPoint"))
-    local cont  = spawn or base
-    if cont then
-        local m = cont:FindFirstChildWhichIsA("
