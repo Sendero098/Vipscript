@@ -1,97 +1,344 @@
--- Services
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
+loadstring([[
+--[[=================================================================
+  VENICE HUB  ::  STEAL A BRAINROT  ::  v4.2
+  ---------------------------------------------------------------
+  v4.2:
+  * LOOP-GOTO anti-teleport: re-applies your CFrame every frame so
+    the game's snap-back-to-base can't win. Steal uses it.
+  * steal now WAITS to actually arrive, WAITS for replication,
+    fires, then POLLS until the brainrot is really gone before
+    returning home. No more bounce-without-stealing.
+  * blacklists a target if it fails twice, so auto-steal can't stall
+  * value reader rewritten: attributes, ValueBase, AND text parsing
+    ("$1.2M/s" style) -> fixes the $0 names
+  * anti-ragdoll, anti-trap-ish, death handling -> no more "die and
+    rejoin" from teleporting
+  * noclip re-applies on respawn
+  * v4.1 observeTag bypass kept
+=================================================================]]
 
-local LocalPlayer = Players.LocalPlayer
-local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local Humanoid = Character:WaitForChild("Humanoid")
-local RootPart = Character:WaitForChild("HumanoidRootPart")
+local LOGF = "VeniceHub_log.txt"
 
--- Configuration
-local Settings = {
-    Enabled = true,
-    StrafeDirection = 1, -- 1 for Right, -1 for Left
-    SpeedMultiplier = 1.0, -- Multiplier on top of WalkSpeed
-    Smoothness = 0.1, -- 0 to 1, lower is smoother but slower to react
-    UseCameraRelative = true, -- Strafe relative to camera
-    ToggleKey = Enum.KeyCode.RightControl -- Key to toggle auto-strafe
+local function log(s)
+    local line = os.date("%H:%M:%S") .. "  " .. tostring(s)
+    pcall(print, "[VH] " .. line)
+    pcall(function()
+        if not writefile then return end
+        local prev = ""
+        if readfile then local ok, d = pcall(readfile, LOGF); if ok and d then prev = d end end
+        local t = {}
+        for l in prev:gmatch("[^\n]+") do table.insert(t, l) end
+        table.insert(t, line)
+        while #t > 200 do table.remove(t, 1) end
+        writefile(LOGF, table.concat(t, "\n"))
+    end)
+end
+
+local function gv() return getgenv and getgenv() or _G end
+gv().VeniceHubGen = (gv().VeniceHubGen or 0) + 1
+local GEN = gv().VeniceHubGen
+local function alive() return gv().VeniceHubGen == GEN end
+
+log("=== v4.2 boot place=" .. tostring(game.PlaceId) .. " ===")
+log("executor: getgc=" .. tostring(getgc ~= nil)
+    .. " hookfn=" .. tostring(hookfunction ~= nil)
+    .. " ncc=" .. tostring(newcclosure ~= nil)
+    .. " rawmt=" .. tostring(getrawmetatable ~= nil))
+
+local LOADSTRING = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Sendero098/Brrbr/refs/heads/main/B%C5%95r"))()'
+pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING) end end)
+
+--================================================================
+--  BYPASS (top level, before anything else)
+--================================================================
+local BYP = {
+    hooked = setmetatable({}, { __mode = "k" }),
+    tagged = setmetatable({}, { __mode = "k" }),
+    connMt = nil, tagCount = 0, armed = 0,
+}
+local obsReady = false
+
+local function hookConnMt()
+    if BYP.connMt then return true end
+    if not (getrawmetatable and hookfunction and newcclosure) then return false end
+    pcall(function()
+        local probe = game:GetService("RunService").Heartbeat:Connect(function() end)
+        local mt = getrawmetatable(probe)
+        if not mt then return end
+        if setreadonly then pcall(setreadonly, mt, false) end
+        local idx = rawget(mt, "__index")
+        if type(idx) ~= "table" then pcall(function() probe:Disconnect() end); return end
+        if setreadonly then pcall(setreadonly, idx, false) end
+        local od = rawget(idx, "Disconnect")
+        if type(od) == "function" then
+            rawset(idx, "Disconnect", newcclosure(function(self, ...)
+                if BYP.tagged[self] then return end
+                return od(self, ...)
+            end))
+            local odl = rawget(idx, "disconnect")
+            if type(odl) == "function" then
+                rawset(idx, "disconnect", newcclosure(function(self, ...)
+                    if BYP.tagged[self] then return end
+                    return odl(self, ...)
+                end))
+            end
+            BYP.connMt = idx
+        end
+        pcall(function() probe:Disconnect() end)
+    end)
+    return BYP.connMt ~= nil
+end
+
+local function hookObserveTag()
+    if not (getgc and hookfunction and newcclosure) then return 0 end
+    if not BYP.connMt then hookConnMt() end
+    local n = 0
+    pcall(function()
+        for _, v in pairs(getgc(true)) do
+            local fn
+            if type(v) == "table" then
+                local f = rawget(v, "observeTag")
+                if type(f) == "function" then fn = f end
+            elseif type(v) == "function" then
+                local ok, info = pcall(debug.getinfo, v)
+                if ok and info and info.name == "observeTag" then fn = v end
+            end
+            if fn and not BYP.hooked[fn] then
+                local old
+                local ok2, ret = pcall(hookfunction, fn, newcclosure(function(...)
+                    local conn = old(...)
+                    if conn then
+                        BYP.tagCount = BYP.tagCount + 1
+                        if BYP.connMt then BYP.tagged[conn] = true; return conn end
+                        return setmetatable({ Connected = true,
+                            Disconnect = function() end, disconnect = function() end },
+                            { __index = function(_, k) return conn[k] end })
+                    end
+                    return conn
+                end))
+                if ok2 then old = ret; BYP.hooked[fn] = true; n = n + 1 end
+            end
+        end
+    end)
+    if n > 0 then
+        BYP.armed = BYP.armed + n; obsReady = true; gv().VH_OBS = true
+        log("bypass: observeTag hooked x" .. tostring(n) .. " connMt=" .. tostring(BYP.connMt ~= nil))
+    end
+    return n
+end
+
+pcall(hookObserveTag)
+log("step: bypass armed=" .. tostring(BYP.armed))
+task.spawn(function()
+    for _ = 1, 240 do
+        if obsReady then return end
+        task.wait(0.25); pcall(hookObserveTag)
+        if obsReady then log("step: bypass armed LATE"); return end
+    end
+end)
+task.spawn(function()
+    while alive() do task.wait(10); pcall(hookObserveTag) end
+end)
+
+--================================================================
+--  KICK WATCHDOG
+--================================================================
+local TS  = game:GetService("TeleportService")
+local PLRS = game:GetService("Players")
+local CFG = { autoRejoin = true }
+local lastRejoin, lastKick = 0, "(none)"
+
+local function tryRejoin(why)
+    if not CFG.autoRejoin then return end
+    if os.clock() - lastRejoin < 6 then return end
+    lastRejoin = os.clock()
+    log("auto-rejoin: " .. why)
+    pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING) end end)
+    pcall(function() TS:Teleport(game.PlaceId, PLRS.LocalPlayer) end)
+end
+
+pcall(function()
+    TS.TeleportInitFailed:Connect(function(_, code, msg)
+        log("teleport FAILED " .. tostring(code) .. " " .. tostring(msg)); lastRejoin = 0
+    end)
+end)
+
+task.spawn(function()
+    local lp = PLRS.LocalPlayer
+    for _ = 1, 400 do if lp then break end; task.wait(0.1); lp = PLRS.LocalPlayer end
+    if not lp then log("step: no LocalPlayer"); return end
+    pcall(function()
+        PLRS.PlayerRemoving:Connect(function(p)
+            if p == lp then
+                lastKick = "PlayerRemoving"
+                log("*** REMOVED ***"); task.delay(0.4, function() tryRejoin("removed") end)
+            end
+        )
+        lp.AncestryChanged:Connect(function(_, parent)
+            if not parent then lastKick = "left DataModel" end
+        end)
+    end)
+    pcall(function()
+        game:GetService("LogService").MessageOut:Connect(function(msg)
+            local m = tostring(msg); local low = m:lower()
+            if low:find("kick") or low:find("exploit") or low:find("detect")
+            or low:find("anti") or low:find("cheat") or low:find("ban") then
+                lastKick = m; log("LOGSVC: " .. m)
+            end
+        end)
+    end)
+    log("step: watchdog armed")
+end)
+
+--==============================================================
+local function MAIN()
+
+local Players         = PLRS
+local RunService      = game:GetService("RunService")
+local UIS             = game:GetService("UserInputService")
+local TweenService    = game:GetService("TweenService")
+local Workspace       = game:GetService("Workspace")
+local HttpService     = game:GetService("HttpService")
+local TeleportService = TS
+local VirtualUser     = game:GetService("VirtualUser")
+
+local LP  = Players.LocalPlayer
+local CAM = Workspace.CurrentCamera
+
+local S = {
+    autoSteal=false, richestFirst=true, minValue=0, legitPrompt=true, fireCooldown=0.9,
+    settleTime=0.45, holdTime=0.15, stealDelay=0.25, returnToBase=true, baseReturn=true,
+    safeTP=true, tpOnly=false, verify=true, retryOnce=true, maxRangeFrac=0.9, requireBody=false,
+    useGoto=true, stealTimeout=2.5, skipLocked=false,
+    autoLock=false, lockEvery=45, autoCollect=false, instantPrompts=false, autoRebirth=false,
+    antiAfk=true, antiRagdoll=true, espBrainrots=false, espPlayers=false, noclip=false,
+    infJump=false, fly=false, lockSpeed=false, walkSpeed=16, flySpeed=55,
+    gearAim=false, gearAutoFire=false, gearRange=60, gearFireCd=0.45, gearSmooth=0.3,
+    gearNames="superman,slap,bat,grapple,medusa,freeze", scanTarget=300, hopMax=45,
 }
 
-local isStrafing = false
-local currentStrafeDir = 1
-local lastInputTime = os.clock()
+local conns = {}
+local function bind(c) table.insert(conns, c); return c end
+local statusLbl, diagLabel, GUI, obsLbl, kickLbl, gotoLbl
 
--- Keybind Handler
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode == Settings.ToggleKey then
-        isStrafing = not isStrafing
-        print("[AutoStrafe] " .. (isStrafing and "ENABLED" or "DISABLED"))
-        
-        -- Optional: Visual feedback via a simple label or sound
-        if isStrafing then
-            currentStrafeDir = 1 -- Default to right when enabled
+--=========== UTILS =============================================
+local function mk(class, props, parent)
+    local ok, inst = pcall(Instance.new, class)
+    if not ok or not inst then return nil end
+    for k, v in pairs(props or {}) do pcall(function() inst[k] = v end) end
+    if parent then pcall(function() inst.Parent = parent end) end
+    return inst
+end
+local function corner(o, r) if o then mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o) end end
+local function stroke(o, c, t, tr)
+    if o then mk("UIStroke", { Color = c or Color3.fromRGB(70,70,85), Thickness = t or 1, Transparency = tr or 0.45 }, o) end
+end
+local function parentGui()
+    local ok, h = pcall(function() return gethui and gethui() end)
+    if ok and h then return h, "gethui" end
+    local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok2 and cg then return cg, "CoreGui" end
+    return LP:WaitForChild("PlayerGui"), "PlayerGui"
+end
+
+local function getChar() return LP.Character end
+local function getHRP() local c = LP.Character; return c and c:FindFirstChild("HumanoidRootPart") end
+local function getHum() local c = LP.Character; return c and c:FindFirstChildOfClass("Humanoid") end
+
+--=========== LOOP GOTO  (the anti-teleport) ====================
+local GOTO = { on = false, pos = nil }
+
+local function gotoSet(pos, yoff)
+    if not pos then return end
+    GOTO.pos = pos + Vector3.new(0, yoff or 2, 0)
+    GOTO.on = true
+    local hrp = getHRP()
+    if hrp then hrp.CFrame = CFrame.new(GOTO.pos) end
+end
+local function gotoStop() GOTO.on = false; GOTO.pos = nil end
+
+bind(RunService.RenderStepped:Connect(function()
+    if not GOTO.on or not GOTO.pos or not alive() then return end
+    local hrp = getHRP()
+    if not hrp then return end
+    if (hrp.Position - GOTO.pos).Magnitude > 1.5 then
+        hrp.CFrame = CFrame.new(GOTO.pos)
+        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    end
+end))
+
+local function tpTo(pos, yOff, safe)
+    local hrp = getHRP(); if not hrp or not pos then return end
+    local target = CFrame.new(pos + Vector3.new(0, yOff or 2, 0))
+    if safe == nil then safe = S.safeTP end
+    if safe then hrp.Anchored = true; hrp.CFrame = target; task.wait(0.05); hrp.Anchored = false
+    else hrp.CFrame = target end
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+end
+
+--=========== WORLD ============================================
+local function getPlots()
+    local p = Workspace:FindFirstChild("Plots")
+    if p then return p:GetChildren() end
+    for _, c in ipairs(Workspace:GetChildren()) do
+        if c:IsA("Folder") and c:FindFirstChild("AnimalPodiums", true) then return c:GetChildren() end
+    end
+    return {}
+end
+local function getPromptAnchor(prompt)
+    local par = prompt and prompt.Parent
+    if not par then return nil end
+    if par:IsA("Attachment") then return par.WorldPosition end
+    if par:IsA("BasePart") then return par.Position end
+    local bp = par:FindFirstChildWhichIsA("BasePart", true)
+    return bp and bp.Position or nil
+end
+local myPlotCache, myPlotTick = nil, 0
+local function isMyPlot(plot)
+    local yb = plot:FindFirstChild("YourBase", true)
+    if yb then
+        if yb:IsA("BoolValue") then if yb.Value then return true end
+        elseif yb:IsA("GuiObject") or yb:IsA("Highlight") or yb:IsA("BillboardGui") then
+            if yb.Enabled then return true end
         end
     end
-end)
-
--- Allow switching direction with A/D keys even when auto is on
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if not isStrafing then return end
-    if input.KeyCode == Enum.KeyCode.A then
-        currentStrafeDir = -1
-    elseif input.KeyCode == Enum.KeyCode.D then
-        currentStrafeDir = 1
+    for _, a in ipairs({ "Owner", "Player", "UserId", "Plr", "Username" }) do
+        local v = plot:GetAttribute(a)
+        if v ~= nil and (v == LP.Name or v == LP.UserId or tostring(v) == tostring(LP.UserId)) then return true end
     end
-end)
-
-UserInputService.InputEnded:Connect(function(input, gameProcessed)
-    if not isStrafing then return end
-    -- Optional: If you want to stop strafing when releasing A/D
-    -- if input.KeyCode == Enum.KeyCode.A or input.KeyCode == Enum.KeyCode.D then
-    --     isStrafing = false 
-    -- end
-end)
-
--- Main Loop
-RunService.RenderStepped:Connect(function()
-    if not isStrafing or not Humanoid or not Humanoid.Parent then return end
-
-    local camera = workspace.CurrentCamera
-    local cameraCFrame = camera.CFrame
-    
-    -- Calculate Strafe Vector
-    local strafeVector
-    if Settings.UseCameraRelative then
-        -- Right vector of the camera
-        local rightVector = cameraCFrame.RightVector
-        strafeVector = rightVector * currentStrafeDir
-    else
-        -- World axis strafe
-        strafeVector = Vector3.new(currentStrafeDir, 0, 0)
+    if plot.Name:find(LP.Name, 1, true) then return true end
+    local n = 0
+    for _, d in ipairs(plot:GetDescendants()) do
+        n = n + 1
+        if d:IsA("TextLabel") and d.Text == LP.Name then return true end
+        if n > 250 then break end
     end
-
-    -- Normalize and apply speed multiplier
-    local targetSpeed = Humanoid.WalkSpeed * Settings.SpeedMultiplier
-    local targetVelocity = strafeVector * targetSpeed
-
-    -- Smoothly interpolate (Lerp) to target velocity for better feel
-    local currentVelocity = Humanoid.MoveDirection
-    local newVelocity = Vector3.Lerp(currentVelocity, targetVelocity, Settings.Smoothness)
-    
-    -- Force the Humanoid to move in this direction
-    Humanoid:Move(newVelocity)
-end)
-
--- Handle Character Reset
-LocalPlayer.CharacterAdded:Connect(function(newChar)
-    Character = newChar
-    Humanoid = Character:WaitForChild("Humanoid")
-    RootPart = Character:WaitForChild("HumanoidRootPart")
-    isStrafing = false -- Reset on death
-    print("[AutoStrafe] Character reset detected. Auto-strafe disabled.")
-end)
-
-print("[AutoStrafe] Loaded. Press " .. Settings.ToggleKey.Name .. " to toggle.")
+    return false
+end
+local function getMyPlot()
+    if myPlotCache and myPlotCache.Parent and (os.clock() - myPlotTick) < 3 then return myPlotCache end
+    myPlotCache, myPlotTick = nil, os.clock()
+    for _, plot in ipairs(getPlots()) do
+        if isMyPlot(plot) then myPlotCache = plot; break end
+    end
+    return myPlotCache
+end
+local function getBaseDrop()
+    local my = getMyPlot()
+    if not my then return nil end
+    local hit = my:FindFirstChild("DeliveryHitbox", true)
+    if hit and hit:IsA("BasePart") then return hit.Position end
+    local any = my:FindFirstChildWhichIsA("BasePart", true)
+    return any and any.Position or nil
+end
+local function findBrainrotModel(pod)
+    local claim = pod:FindFirstChild("Claim")
+    if claim then
+        local m = claim:FindFirstChildWhichIsA("Model"); if m then return m end
+        local p = claim:FindFirstChildWhichIsA("BasePart"); if p then return p end
+    end
+    local base  = pod:FindFirstChild("Base")
+    local spawn = base and (base:FindFirstChild("Spawn") or base:FindFirstChild("SpawnPoint"))
+    local cont  = spawn or base
+    if cont then
+        local m = cont:FindFirstChildWhichIsA("
