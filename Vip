@@ -1,5 +1,5 @@
---[[ SAB AutoSteal v0.1 - keyless, mobile/Delta friendly
-     Game: Steal a Brainrot (109983668079237) ]]
+--[[ SAB AutoSteal v0.2 - keyless, mobile/Delta friendly
+     FIX: observeTag is now WRAPPED (original still runs), not replaced ]]
 
 local Players      = game:GetService("Players")
 local RS           = game:GetService("ReplicatedStorage")
@@ -10,57 +10,78 @@ local player       = Players.LocalPlayer
 
 local CFG = {
     AutoSteal = true, Interval = 0.25, MinValue = 0,
-    Teleport = true, AntiKick = true, Noclip = true, Desync = false,
+    Teleport = true, AntiCheat = true, Noclip = true, Desync = false,
+    Debug = true,
 }
 getgenv().SAB = CFG
 
+local function log(...) if CFG.Debug then print("[SAB]", ...) end end
+
 ------------------------------------------------------------------
--- 1. ANTI-CHEAT / ANTI-KICK
+-- 1. ANTI-CHEAT (observeTag WRAPPED so the AC's callback still runs)
 ------------------------------------------------------------------
-if CFG.AntiKick then
+if CFG.AntiCheat then
+    local hooked = false
     pcall(function()
         for _, v in pairs(getgc(true)) do
-            if type(v) == "table" and type(rawget(v, "observeTag")) == "function" then
-                rawset(v, "observeTag", function(...)
-                    return { Disconnect = function() end, disconnect = function() end }
-                end)
-                print("[SAB] observeTag neutered")
-                break
+            if type(v) == "table" and not hooked then
+                local orig = rawget(v, "observeTag")
+                if type(orig) == "function" then
+                    hooked = true
+                    rawset(v, "observeTag", function(...)
+                        local ok, conn = pcall(orig, ...)
+                        local stub = { Disconnect = function() end, disconnect = function() end }
+                        if ok and type(conn) == "table" then
+                            stub.Connected = true
+                            stub.__conn = conn
+                            setmetatable(stub, {
+                                __index = function(_, k)
+                                    local val = conn[k]
+                                    if type(val) == "function" then
+                                        return function(_, ...) return val(conn, ...) end
+                                    end
+                                    return val
+                                end,
+                            })
+                        end
+                        return stub
+                    end)
+                end
             end
         end
     end)
+    log("observeTag wrapped:", hooked)
 
     pcall(function()
         local mt = getrawmetatable(game)
         local old = mt.__namecall
-        setreadonly(mt, false)
+        if setreadonly then setreadonly(mt, false) end
         mt.__namecall = newcclosure(function(self, ...)
             local m = getnamecallmethod()
-            if m == "Kick" then return end
+            if m == "Kick" and self == player then return end
             if m == "FireServer" then
                 local a = ...
-                local s = tostring(a):lower()
-                if s == "x-15" or s == "x-16" then return end
+                if type(a) == "string" then
+                    local s = a:lower()
+                    if s == "x-15" or s == "x-16" then return end
+                end
             end
             return old(self, ...)
         end)
-        setreadonly(mt, true)
+        if setreadonly then setreadonly(mt, true) end
+        log("kick + flag hook installed")
     end)
 end
 
 ------------------------------------------------------------------
--- 2. AUTO-DETECT THE STEAL REMOTE (survives patches)
+-- 2. FIND THE STEAL REMOTE AT RUNTIME
 ------------------------------------------------------------------
 local function resolveStealRemote()
-    local seen = {}
     for _, root in ipairs({ RS, RS:FindFirstChild("Remotes"), RS:FindFirstChild("Events"),
                             RS:FindFirstChild("RemoteEvents"), RS:FindFirstChild("Net") }) do
-        if root and not seen[root] then
-            seen[root] = true
+        if root then
             for _, o in ipairs(root:GetDescendants()) do
-                if o:IsA("RemoteEvent") and o.Name:lower():find("steal") then
-                    return o
-                end
+                if o:IsA("RemoteEvent") and o.Name:lower():find("steal") then return o end
             end
         end
     end
@@ -73,11 +94,11 @@ task.spawn(function()
         if not StealRemote then task.wait(1) end
     end
     getgenv().SAB_StealRemote = StealRemote
-    print("[SAB] steal remote found ->", StealRemote:GetFullName())
+    log("STEAL REMOTE ->", StealRemote:GetFullName())
 end)
 
 ------------------------------------------------------------------
--- 3. FIND BRAINROTS ON OTHER BASES
+-- 3. SCAN BRAINROTS
 ------------------------------------------------------------------
 local function getOwner(o)
     local v = o:FindFirstChild("Owner")
@@ -112,10 +133,11 @@ local function scan()
 end
 
 ------------------------------------------------------------------
--- 4. STEAL (tp on top -> fire in same frame)
+-- 4. STEAL
 ------------------------------------------------------------------
 local function stealOnce()
-    local t = scan()[1]
+    local list = scan()
+    local t = list[1]
     if not t or not StealRemote then return end
     local char = player.Character
     local hrp  = char and char:FindFirstChild("HumanoidRootPart")
@@ -127,16 +149,14 @@ local function stealOnce()
 end
 
 ------------------------------------------------------------------
--- 5. LOOPS + NOCLIP
+-- 5. LOOPS
 ------------------------------------------------------------------
 RunService.Stepped:Connect(function()
     if not CFG.Noclip then return end
     local char = player.Character
     if char then
         for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") and p ~= char:FindFirstChild("HumanoidRootPart") then
-                p.CanCollide = false
-            end
+            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then p.CanCollide = false end
         end
     end
 end)
@@ -149,31 +169,30 @@ task.spawn(function()
 end)
 
 ------------------------------------------------------------------
--- 6. SERVER HOP (the video's "finder" part)
+-- 6. HOP + COMMANDS
 ------------------------------------------------------------------
 local function hop()
-    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.GameId)
-    local ok, body = pcall(game.HttpGet, game, url)
+    local ok, body = pcall(game.HttpGet, game,
+        ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.GameId))
     if not ok then return end
-    local data = HttpService:JSONDecode(body)
     local list = {}
-    for _, s in ipairs(data.data or {}) do
+    for _, s in ipairs(HttpService:JSONDecode(body).data or {}) do
         if s.id ~= game.JobId and s.playing < s.maxPlayers then list[#list+1] = s end
     end
     if #list > 0 then TeleportSvc:TeleportToPlaceInstance(game.PlaceId, list[1].id, player) end
 end
 
-------------------------------------------------------------------
--- 7. CHAT COMMANDS
-------------------------------------------------------------------
 player.Chatted:Connect(function(msg)
     local m = msg:lower()
-    if m == "/sab off" then CFG.AutoSteal = false; print("[SAB] steal OFF")
-    elseif m == "/sab on" then CFG.AutoSteal = true; print("[SAB] steal ON")
+    if m == "/sab off" then CFG.AutoSteal = false; log("steal OFF")
+    elseif m == "/sab on" then CFG.AutoSteal = true; log("steal ON")
     elseif m == "/sab hop" then hop()
-    elseif m == "/sab tp" then CFG.Teleport = not CFG.Teleport; print("[SAB] tp:", CFG.Teleport)
-    elseif m == "/sab desync" then CFG.Desync = not CFG.Desync; print("[SAB] desync:", CFG.Desync)
-    elseif m == "/sab help" then print("/sab on|off|hop|tp|desync|help") end
+    elseif m == "/sab tp" then CFG.Teleport = not CFG.Teleport; log("tp:", CFG.Teleport)
+    elseif m == "/sab desync" then CFG.Desync = not CFG.Desync; log("desync:", CFG.Desync)
+    elseif m == "/sab scan" then
+        local l = scan()
+        log("targets:", #l, "best:", l[1] and l[1].obj.Name or "none", l[1] and l[1].val or "")
+    elseif m == "/sab help" then log("/sab on|off|hop|tp|desync|scan|help") end
 end)
 
-print("[SAB] v0.1 loaded. /sab help")
+log("v0.2 loaded")
