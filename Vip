@@ -1,102 +1,179 @@
-loadstring([[
---[[=================================================================
-  VENICE HUB  ::  STEAL A BRAINROT  ::  v4.2.1 (DELTA FIXED)
-  ---------------------------------------------------------------
-  * LOOP-GOTO anti-teleport: re-applies your CFrame every frame so
-    the game's snap-back-to-base can't win. Steal uses it.
-  * steal now WAITS to actually arrive, WAITS for replication,
-    fires, then POLLS until the brainrot is really gone before
-    returning home. No more bounce-without-stealing.
-  * blacklists a target if it fails twice, so auto-steal can't stall
-  * value reader rewritten: attributes, ValueBase, AND text parsing
-    ("$1.2M/s" style) -> fixes the $0 names
-  * anti-ragdoll, anti-trap-ish, death handling -> no more "die and
-    rejoin" from teleporting
-  * noclip re-applies on respawn
-  * v4.1 observeTag bypass kept
-  * FIXED: Syntax errors, Delta-specific function handling, and 
-    added a Diagnostic button for troubleshooting.
-=================================================================]]
+--[[ SAB AutoSteal v0.1 - keyless, mobile/Delta friendly
+     Game: Steal a Brainrot (109983668079237) ]]
 
-local LOGF = "VeniceHub_log.txt"
+local Players      = game:GetService("Players")
+local RS           = game:GetService("ReplicatedStorage")
+local RunService   = game:GetService("RunService")
+local HttpService  = game:GetService("HttpService")
+local TeleportSvc  = game:GetService("TeleportService")
+local player       = Players.LocalPlayer
 
-local function log(s)
-    local line = os.date("%H:%M:%S") .. "  " .. tostring(s)
-    pcall(print, "[VH] " .. line)
-    pcall(function()
-        if not writefile then return end
-        local prev = ""
-        if readfile then local ok, d = pcall(readfile, LOGF); if ok and d then prev = d end end
-        local t = {}
-        for l in prev:gmatch("[^\n]+") do table.insert(t, l) end
-        table.insert(t, line)
-        while #t > 200 do table.remove(t, 1) end
-        writefile(LOGF, table.concat(t, "\n"))
-    end)
-end
-
-local function gv() return getgenv and getgenv() or _G end
-gv().VeniceHubGen = (gv().VeniceHubGen or 0) + 1
-local GEN = gv().VeniceHubGen
-local function alive() return gv().VeniceHubGen == GEN end
-
-log("=== v4.2.1 boot place=" .. tostring(game.PlaceId) .. " ===")
-log("executor: getgc=" .. tostring(getgc ~= nil)
-    .. " hookfn=" .. tostring(hookfunction ~= nil)
-    .. " ncc=" .. tostring(newcclosure ~= nil)
-    .. " rawmt=" .. tostring(getrawmetatable ~= nil)
-    .. " gethui=" .. tostring(gethui ~= nil)
-    .. " qot=" .. tostring(queue_on_teleport ~= nil))
-
--- Queue this script for future teleports
-local SELF_URL = "https://raw.githubusercontent.com/Sendero098/Vipscript/refs/heads/main/Vip"
-local LOADSTRING_CMD = 'loadstring(game:HttpGet("' .. SELF_URL .. '"))()'
-pcall(function() if queue_on_teleport then queue_on_teleport(LOADSTRING_CMD) end end)
-
---================================================================
---  BYPASS (top level, before anything else)
---================================================================
-local BYP = {
-    hooked = setmetatable({}, { __mode = "k" }),
-    tagged = setmetatable({}, { __mode = "k" }),
-    connMt = nil, tagCount = 0, armed = 0,
+local CFG = {
+    AutoSteal = true, Interval = 0.25, MinValue = 0,
+    Teleport = true, AntiKick = true, Noclip = true, Desync = false,
 }
-local obsReady = false
+getgenv().SAB = CFG
 
-local function hookConnMt()
-    if BYP.connMt then return true end
-    if not (getrawmetatable and hookfunction and newcclosure) then return false end
-    pcall(function()
-        local probe = game:GetService("RunService").Heartbeat:Connect(function() end)
-        local mt = getrawmetatable(probe)
-        if not mt then return end
-        if setreadonly then pcall(setreadonly, mt, false) end
-        local idx = rawget(mt, "__index")
-        if type(idx) ~= "table" then pcall(function() probe:Disconnect() end); return end
-        if setreadonly then pcall(setreadonly, idx, false) end
-        local od = rawget(idx, "Disconnect")
-        if type(od) == "function" then
-            rawset(idx, "Disconnect", newcclosure(function(self, ...)
-                if BYP.tagged[self] then return end
-                return od(self, ...)
-            end))
-            local odl = rawget(idx, "disconnect")
-            if type(odl) == "function" then
-                rawset(idx, "disconnect", newcclosure(function(self, ...)
-                    if BYP.tagged[self] then return end
-                    return odl(self, ...)
-                end))
-            end
-            BYP.connMt = idx
-        end
-        pcall(function() probe:Disconnect() end)
-    end)
-    return BYP.connMt ~= nil
-end
-
-local function hookObserveTag()
-    if not (getgc and hookfunction and newcclosure) then return 0 end
-    if not BYP.connMt then hookConnMt() end
-    local n = 0
+------------------------------------------------------------------
+-- 1. ANTI-CHEAT / ANTI-KICK
+------------------------------------------------------------------
+if CFG.AntiKick then
     pcall(function()
         for _, v in pairs(getgc(true)) do
+            if type(v) == "table" and type(rawget(v, "observeTag")) == "function" then
+                rawset(v, "observeTag", function(...)
+                    return { Disconnect = function() end, disconnect = function() end }
+                end)
+                print("[SAB] observeTag neutered")
+                break
+            end
+        end
+    end)
+
+    pcall(function()
+        local mt = getrawmetatable(game)
+        local old = mt.__namecall
+        setreadonly(mt, false)
+        mt.__namecall = newcclosure(function(self, ...)
+            local m = getnamecallmethod()
+            if m == "Kick" then return end
+            if m == "FireServer" then
+                local a = ...
+                local s = tostring(a):lower()
+                if s == "x-15" or s == "x-16" then return end
+            end
+            return old(self, ...)
+        end)
+        setreadonly(mt, true)
+    end)
+end
+
+------------------------------------------------------------------
+-- 2. AUTO-DETECT THE STEAL REMOTE (survives patches)
+------------------------------------------------------------------
+local function resolveStealRemote()
+    local seen = {}
+    for _, root in ipairs({ RS, RS:FindFirstChild("Remotes"), RS:FindFirstChild("Events"),
+                            RS:FindFirstChild("RemoteEvents"), RS:FindFirstChild("Net") }) do
+        if root and not seen[root] then
+            seen[root] = true
+            for _, o in ipairs(root:GetDescendants()) do
+                if o:IsA("RemoteEvent") and o.Name:lower():find("steal") then
+                    return o
+                end
+            end
+        end
+    end
+end
+
+local StealRemote
+task.spawn(function()
+    while not StealRemote do
+        StealRemote = resolveStealRemote()
+        if not StealRemote then task.wait(1) end
+    end
+    getgenv().SAB_StealRemote = StealRemote
+    print("[SAB] steal remote found ->", StealRemote:GetFullName())
+end)
+
+------------------------------------------------------------------
+-- 3. FIND BRAINROTS ON OTHER BASES
+------------------------------------------------------------------
+local function getOwner(o)
+    local v = o:FindFirstChild("Owner")
+    if v and (v:IsA("ObjectValue") or v:IsA("StringValue")) then return v.Value end
+    return o:GetAttribute("Owner")
+end
+
+local function getValue(o)
+    for _, n in ipairs({"Value","Price","Worth","Cost"}) do
+        local v = o:FindFirstChild(n)
+        if v and (v:IsA("NumberValue") or v:IsA("IntValue")) then return v.Value end
+    end
+    return o:GetAttribute("Value") or o:GetAttribute("Price") or 0
+end
+
+local function scan()
+    local out = {}
+    for _, o in ipairs(workspace:GetDescendants()) do
+        if o:IsA("Model") and (o:FindFirstChild("Owner") or o.Name:lower():find("brainrot")) then
+            local owner = getOwner(o)
+            if owner and owner ~= player then
+                local val = getValue(o)
+                if val >= CFG.MinValue then
+                    local root = o.PrimaryPart or o:FindFirstChildWhichIsA("BasePart")
+                    if root then out[#out+1] = {obj=o, val=val, root=root} end
+                end
+            end
+        end
+    end
+    table.sort(out, function(a,b) return a.val > b.val end)
+    return out
+end
+
+------------------------------------------------------------------
+-- 4. STEAL (tp on top -> fire in same frame)
+------------------------------------------------------------------
+local function stealOnce()
+    local t = scan()[1]
+    if not t or not StealRemote then return end
+    local char = player.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    if CFG.Teleport then hrp.CFrame = t.root.CFrame * CFrame.new(0, 3, 0) end
+    if CFG.Desync then hrp.Anchored = true end
+    StealRemote:FireServer(t.obj)
+    if CFG.Desync then task.wait(); hrp.Anchored = false end
+end
+
+------------------------------------------------------------------
+-- 5. LOOPS + NOCLIP
+------------------------------------------------------------------
+RunService.Stepped:Connect(function()
+    if not CFG.Noclip then return end
+    local char = player.Character
+    if char then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p ~= char:FindFirstChild("HumanoidRootPart") then
+                p.CanCollide = false
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(CFG.Interval)
+        if CFG.AutoSteal then pcall(stealOnce) end
+    end
+end)
+
+------------------------------------------------------------------
+-- 6. SERVER HOP (the video's "finder" part)
+------------------------------------------------------------------
+local function hop()
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.GameId)
+    local ok, body = pcall(game.HttpGet, game, url)
+    if not ok then return end
+    local data = HttpService:JSONDecode(body)
+    local list = {}
+    for _, s in ipairs(data.data or {}) do
+        if s.id ~= game.JobId and s.playing < s.maxPlayers then list[#list+1] = s end
+    end
+    if #list > 0 then TeleportSvc:TeleportToPlaceInstance(game.PlaceId, list[1].id, player) end
+end
+
+------------------------------------------------------------------
+-- 7. CHAT COMMANDS
+------------------------------------------------------------------
+player.Chatted:Connect(function(msg)
+    local m = msg:lower()
+    if m == "/sab off" then CFG.AutoSteal = false; print("[SAB] steal OFF")
+    elseif m == "/sab on" then CFG.AutoSteal = true; print("[SAB] steal ON")
+    elseif m == "/sab hop" then hop()
+    elseif m == "/sab tp" then CFG.Teleport = not CFG.Teleport; print("[SAB] tp:", CFG.Teleport)
+    elseif m == "/sab desync" then CFG.Desync = not CFG.Desync; print("[SAB] desync:", CFG.Desync)
+    elseif m == "/sab help" then print("/sab on|off|hop|tp|desync|help") end
+end)
+
+print("[SAB] v0.1 loaded. /sab help")
